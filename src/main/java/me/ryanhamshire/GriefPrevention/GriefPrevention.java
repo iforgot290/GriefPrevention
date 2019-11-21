@@ -32,14 +32,8 @@ import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import me.ryanhamshire.GriefPrevention.DataStore.NoTransferException;
-import me.ryanhamshire.GriefPrevention.events.PreventBlockBreakEvent;
-import me.ryanhamshire.GriefPrevention.events.SaveTrappedPlayerEvent;
-import me.ryanhamshire.GriefPrevention.events.TrustChangedEvent;
-import me.ryanhamshire.GriefPrevention.metrics.MetricsHandler;
-import net.milkbowl.vault.economy.Economy;
-
 import org.bukkit.BanList;
+import org.bukkit.BanList.Type;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Chunk;
@@ -50,11 +44,11 @@ import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.Statistic;
 import org.bukkit.World;
-import org.bukkit.BanList.Type;
 import org.bukkit.World.Environment;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
-import org.bukkit.command.*;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
@@ -67,6 +61,15 @@ import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.BlockIterator;
+
+import me.ryanhamshire.GriefPrevention.DataStore.NoTransferException;
+import me.ryanhamshire.GriefPrevention.commands.CommandClaim;
+import me.ryanhamshire.GriefPrevention.commands.CommandExtendClaim;
+import me.ryanhamshire.GriefPrevention.events.PreventBlockBreakEvent;
+import me.ryanhamshire.GriefPrevention.events.SaveTrappedPlayerEvent;
+import me.ryanhamshire.GriefPrevention.events.TrustChangedEvent;
+import me.ryanhamshire.GriefPrevention.metrics.MetricsHandler;
+import net.milkbowl.vault.economy.Economy;
 
 public class GriefPrevention extends JavaPlugin
 {
@@ -403,6 +406,8 @@ public class GriefPrevention extends JavaPlugin
 		{
 			new IgnoreLoaderThread(player.getUniqueId(), this.dataStore.getPlayerData(player.getUniqueId()).ignoredPlayers).start();
 		}
+		
+		loadCommands();
 
 		AddLogEntry("Boot finished.");
 
@@ -411,6 +416,11 @@ public class GriefPrevention extends JavaPlugin
 			new MetricsHandler(this, dataMode);
 		}
 		catch (Throwable ignored){}
+	}
+	
+	private void loadCommands() {
+		this.getCommand("claim").setExecutor(new CommandClaim());
+		this.getCommand("extendclaim").setExecutor(new CommandExtendClaim());
 	}
 
 	private void loadConfig()
@@ -1005,271 +1015,6 @@ public class GriefPrevention extends JavaPlugin
 		if (sender instanceof Player)
 		{
 			player = (Player) sender;
-		}
-
-		//claim
-		if(cmd.getName().equalsIgnoreCase("claim") && player != null)
-		{
-			if(!GriefPrevention.instance.claimsEnabledForWorld(player.getWorld()))
-			{
-				GriefPrevention.sendMessage(player, TextMode.Err, Messages.ClaimsDisabledWorld);
-				return true;
-			}
-
-			PlayerData playerData = this.dataStore.getPlayerData(player.getUniqueId());
-
-			//if he's at the claim count per player limit already and doesn't have permission to bypass, display an error message
-			if(GriefPrevention.instance.config_claims_maxClaimsPerPlayer > 0 &&
-					!player.hasPermission("griefprevention.overrideclaimcountlimit") &&
-					playerData.getClaims().size() >= GriefPrevention.instance.config_claims_maxClaimsPerPlayer)
-			{
-				GriefPrevention.sendMessage(player, TextMode.Err, Messages.ClaimCreationFailedOverClaimCountLimit);
-				return true;
-			}
-
-			//default is chest claim radius, unless -1
-			int radius = GriefPrevention.instance.config_claims_automaticClaimsForNewPlayersRadius;
-			if(radius < 0) radius = (int)Math.ceil(Math.sqrt(GriefPrevention.instance.config_claims_minArea) / 2);
-
-			//if player has any claims, respect claim minimum size setting
-			if(playerData.getClaims().size() > 0)
-			{
-				//if player has exactly one land claim, this requires the claim modification tool to be in hand (or creative mode player)
-				if(playerData.getClaims().size() == 1 && player.getGameMode() != GameMode.CREATIVE && player.getItemInHand().getType() != GriefPrevention.instance.config_claims_modificationTool)
-				{
-					GriefPrevention.sendMessage(player, TextMode.Err, Messages.MustHoldModificationToolForThat);
-					return true;
-				}
-
-				radius = (int)Math.ceil(Math.sqrt(GriefPrevention.instance.config_claims_minArea) / 2);
-			}
-
-			//allow for specifying the radius
-			if(args.length > 0)
-			{
-				if(playerData.getClaims().size() < 2 && player.getGameMode() != GameMode.CREATIVE && player.getItemInHand().getType() != GriefPrevention.instance.config_claims_modificationTool)
-				{
-					GriefPrevention.sendMessage(player, TextMode.Err, Messages.RadiusRequiresGoldenShovel);
-					return true;
-				}
-
-				int specifiedRadius;
-				try
-				{
-					specifiedRadius = Integer.parseInt(args[0]);
-				}
-				catch(NumberFormatException e)
-				{
-					return false;
-				}
-
-				if(specifiedRadius < radius)
-				{
-					GriefPrevention.sendMessage(player, TextMode.Err, Messages.MinimumRadius, String.valueOf(radius));
-					return true;
-				}
-				else
-				{
-					radius = specifiedRadius;
-				}
-			}
-
-			if(radius < 0) radius = 0;
-
-			Location lc = player.getLocation().add(-radius, 0, -radius);
-			Location gc = player.getLocation().add(radius, 0, radius);
-
-			//player must have sufficient unused claim blocks
-			int area = Math.abs((gc.getBlockX() - lc.getBlockX() + 1) * (gc.getBlockZ() - lc.getBlockZ() + 1));
-			int remaining = playerData.getRemainingClaimBlocks();
-			if(remaining < area)
-			{
-				GriefPrevention.sendMessage(player, TextMode.Err, Messages.CreateClaimInsufficientBlocks, String.valueOf(area - remaining));
-				GriefPrevention.instance.dataStore.tryAdvertiseAdminAlternatives(player);
-				return true;
-			}
-
-			CreateClaimResult result = this.dataStore.createClaim(lc.getWorld(), 
-					lc.getBlockX(), gc.getBlockX(),
-					lc.getBlockY() - GriefPrevention.instance.config_claims_claimsExtendIntoGroundDistance - 1,
-					gc.getWorld().getHighestBlockYAt(gc) - GriefPrevention.instance.config_claims_claimsExtendIntoGroundDistance - 1,
-					lc.getBlockZ(), gc.getBlockZ(),
-					player.getUniqueId(), null, null, player);
-			if(!result.succeeded)
-			{
-				if(result.claim != null)
-				{
-					GriefPrevention.sendMessage(player, TextMode.Err, Messages.CreateClaimFailOverlapShort);
-
-					Visualization visualization = Visualization.FromClaim(result.claim, player.getEyeLocation().getBlockY(), VisualizationType.ErrorClaim, player.getLocation());
-					Visualization.Apply(player, visualization);
-				}
-				else
-				{
-					GriefPrevention.sendMessage(player, TextMode.Err, Messages.CreateClaimFailOverlapRegion);
-				}
-			}
-			else
-			{
-				GriefPrevention.sendMessage(player, TextMode.Success, Messages.CreateClaimSuccess);
-
-				//link to a video demo of land claiming, based on world type
-				if(GriefPrevention.instance.creativeRulesApply(player.getLocation()))
-				{
-					GriefPrevention.sendMessage(player, TextMode.Instr, Messages.CreativeBasicsVideo2, DataStore.CREATIVE_VIDEO_URL);           
-				}
-				else if(GriefPrevention.instance.claimsEnabledForWorld(player.getLocation().getWorld()))
-				{
-					GriefPrevention.sendMessage(player, TextMode.Instr, Messages.SurvivalBasicsVideo2, DataStore.SURVIVAL_VIDEO_URL);
-				}
-				Visualization visualization = Visualization.FromClaim(result.claim, player.getEyeLocation().getBlockY(), VisualizationType.Claim, player.getLocation());
-				Visualization.Apply(player, visualization);
-				playerData.claimResizing = null;
-				playerData.lastShovelLocation = null;
-
-				this.autoExtendClaim(result.claim);
-			}
-
-			return true;
-		}
-
-		//extendclaim
-		if(cmd.getName().equalsIgnoreCase("extendclaim") && player != null)
-		{
-			if(args.length < 1)
-			{
-				//link to a video demo of land claiming, based on world type
-				if(GriefPrevention.instance.creativeRulesApply(player.getLocation()))
-				{
-					GriefPrevention.sendMessage(player, TextMode.Instr, Messages.CreativeBasicsVideo2, DataStore.CREATIVE_VIDEO_URL);           
-				}
-				else if(GriefPrevention.instance.claimsEnabledForWorld(player.getLocation().getWorld()))
-				{
-					GriefPrevention.sendMessage(player, TextMode.Instr, Messages.SurvivalBasicsVideo2, DataStore.SURVIVAL_VIDEO_URL);
-				}
-				return false;
-			}
-
-			int amount;
-			try
-			{
-				amount = Integer.parseInt(args[0]);
-			}
-			catch(NumberFormatException e)
-			{
-				//link to a video demo of land claiming, based on world type
-				if(GriefPrevention.instance.creativeRulesApply(player.getLocation()))
-				{
-					GriefPrevention.sendMessage(player, TextMode.Instr, Messages.CreativeBasicsVideo2, DataStore.CREATIVE_VIDEO_URL);           
-				}
-				else if(GriefPrevention.instance.claimsEnabledForWorld(player.getLocation().getWorld()))
-				{
-					GriefPrevention.sendMessage(player, TextMode.Instr, Messages.SurvivalBasicsVideo2, DataStore.SURVIVAL_VIDEO_URL);
-				}
-				return false;
-			}
-
-			//requires claim modification tool in hand
-			if(player.getGameMode() != GameMode.CREATIVE && player.getItemInHand().getType() != GriefPrevention.instance.config_claims_modificationTool)
-			{
-				GriefPrevention.sendMessage(player, TextMode.Err, Messages.MustHoldModificationToolForThat);
-				return true;
-			}
-
-			//must be standing in a land claim
-			PlayerData playerData = this.dataStore.getPlayerData(player.getUniqueId());
-			Claim claim = this.dataStore.getClaimAt(player.getLocation(), true, playerData.lastClaim);
-			if(claim == null)
-			{
-				GriefPrevention.sendMessage(player, TextMode.Err, Messages.StandInClaimToResize);
-				return true;
-			}
-
-			//must have permission to edit the land claim you're in
-			String errorMessage = claim.allowEdit(player);
-			if(errorMessage != null)
-			{
-				GriefPrevention.sendMessage(player, TextMode.Err, Messages.NotYourClaim);
-				return true;
-			}
-
-			//determine new corner coordinates
-			org.bukkit.util.Vector direction = player.getLocation().getDirection();
-			if(direction.getY() > .75)
-			{
-				GriefPrevention.sendMessage(player, TextMode.Info, Messages.ClaimsExtendToSky);
-				return true;
-			}
-
-			if(direction.getY() < -.75)
-			{
-				GriefPrevention.sendMessage(player, TextMode.Info, Messages.ClaimsAutoExtendDownward);
-				return true;
-			}
-
-			Location lc = claim.getLesserBoundaryCorner();
-			Location gc = claim.getGreaterBoundaryCorner();
-			int newx1 = lc.getBlockX();
-			int newx2 = gc.getBlockX();
-			int newy1 = lc.getBlockY();
-			int newy2 = gc.getBlockY();
-			int newz1 = lc.getBlockZ();
-			int newz2 = gc.getBlockZ();
-
-			//if changing Z only
-			if(Math.abs(direction.getX()) < .3)
-			{
-				if(direction.getZ() > 0)
-				{
-					newz2 += amount;  //north
-				}
-				else
-				{
-					newz1 -= amount;  //south
-				}
-			}
-
-			//if changing X only
-			else if(Math.abs(direction.getZ()) < .3)
-			{
-				if(direction.getX() > 0)
-				{
-					newx2 += amount;  //east
-				}
-				else
-				{
-					newx1 -= amount;  //west
-				}
-			}
-
-			//diagonals
-			else
-			{
-				if(direction.getX() > 0)
-				{
-					newx2 += amount;
-				}
-				else
-				{
-					newx1 -= amount;
-				}
-
-				if(direction.getZ() > 0)
-				{
-					newz2 += amount;
-				}
-				else
-				{
-					newz1 -= amount;
-				}
-			}
-
-			//attempt resize
-			playerData.claimResizing = claim;
-			this.dataStore.resizeClaimWithChecks(player, playerData, newx1, newx2, newy1, newy2, newz1, newz2);
-			playerData.claimResizing = null;
-
-			return true;
 		}
 
 		//abandonclaim

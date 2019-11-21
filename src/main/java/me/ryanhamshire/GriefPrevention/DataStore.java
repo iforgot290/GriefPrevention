@@ -1286,7 +1286,7 @@ public abstract class DataStore
 		return result;
 	}
 	
-	void resizeClaimWithChecks(Player player, PlayerData playerData, int newx1, int newx2, int newy1, int newy2, int newz1, int newz2)
+	public void resizeClaimWithChecks(Player player, PlayerData playerData, int newx1, int newx2, int newy1, int newy2, int newz1, int newz2)
     {
 	    //for top level claims, apply size rules and claim blocks requirement
         if(playerData.claimResizing.parent == null)
